@@ -5,15 +5,18 @@ import numpy as np
 import pandas as pd
 from gensim import corpora, models, similarities
 from gensim.models import word2vec
-from keras.layers import Input, Dense, LSTM, merge, Lambda
+from keras.layers import Input, Dense, LSTM, merge, Lambda, GRU
 #from keras.layers import Merge,Layer
 from keras.models import Model, Sequential
 from keras.optimizers import Adam
 from keras.regularizers import l2
 import keras.backend as K
+from keras.callbacks import EarlyStopping, TensorBoard, ModelCheckpoint
 
 class DataAccessor:
     def __init__(self,verbose=False):
+        self.randomSeed = 99 # これによって、Train/Testが変更されるので注意必要
+        self.validFrac = 0.1 # Validationで使う割合
         self.nDim = 100
         self.puncReStr = string.punctuation
         self.puncReStr = "".join([x for x in self.puncReStr if x not in ["-","'"]])
@@ -40,7 +43,6 @@ class DataAccessor:
 
     def getColumnPairs_str(self,index,colPairs):
         d = self.d
-        #return d[index][colPairs[0]],d[index][colPairs[1]]
         return d[colPairs[0]][index],d[colPairs[1]][index]
 
     def getColumnPairs_w2v(self,index,colPairs):
@@ -65,6 +67,17 @@ class DataAccessor:
                 continue
         return res
 
+    def getTargetLines(self,mode="all"):
+        assert mode in ["all","train","valid"]
+        random.seed(self.randomSeed) # 重要
+        if   mode=="all"  : targetLines = range(self.nLines)
+        else:
+            validLines = random.sample(range(self.nLines), int(self.nLines * self.validFrac))
+            trainLines   = list(set(range(self.nLines)) - set(validLines))
+            if   mode=="train": targetLines = trainLines
+            elif mode=="valid": targetLines = validLines
+        return targetLines
+
 class net:
     def __init__(self,args,dAcc,columnPairs,goodFrac=0.5):
         self.dAcc    = dAcc
@@ -76,109 +89,11 @@ class net:
         self.buildModel()
         return
 
-    def buildModel(self):
-        def create_base_network(input_shape):
-            seq = Sequential()
-            seq.add(LSTM(32,input_shape=input_shape))
-            seq.add(Dense(32,activation="sigmoid",kernel_regularizer=l2(1e-3)))
-            return seq
-        def euclidean_distance(vects):
-            x, y = vects
-            return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
-        def eucl_dist_output_shape(shapes):
-            shape1, shape2 = shapes
-            return (shape1[0], 1)
-
-        input_shape = (self.nLength,self.nDim)
-
-        inX1 = Input(input_shape,name="input_1")
-        inX2 = Input(input_shape,name="input_2")
-
-        base_network = create_base_network(input_shape)
-
-        outX1 = base_network(inX1)
-        outX2 = base_network(inX2)
-
-        distance = merge([outX1,outX2],mode = euclidean_distance, output_shape=eucl_dist_output_shape,name="distance")
-        model = Model(inputs=[inX1, inX2], outputs=distance)
-
-        optimizer = Adam(1e-4)
-        model.compile(loss="mean_squared_error",optimizer=optimizer)
-
-        model.summary()
-        self.model = model
-        return
-
-    def getOneBatch(self,columnPairs,goodFrac=0.5):
-
-        nGood = int(self.nBatch * goodFrac)
-        nBad  = self.nBatch - nGood
-
-        batchVec1  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
-        batchVec2  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
-        batchTruth = np.zeros( (self.nBatch, 1)        , dtype=np.float32)
-
-        itemList1 = []
-        itemList2 = []
-        wordList1 = []
-        wordList2 = []
-        batchWord1 = []
-        batchWord2 = []
-
-        # まずは正解を入れ込む
-        cnt = 0
-        for i in np.random.randint(0,self.dAcc.nLines,nGood):
-            v1,v2 = self.dAcc.getColumnPairs_w2v(i,columnPairs)
-            w1,w2 = self.dAcc.getColumnPairs_str(i,columnPairs)
-            itemList1.append(v1)
-            itemList2.append(v2)
-            wordList1.append(w1)
-            wordList2.append(w2)
-            batchWord1.append(w1)
-            batchWord2.append(w2)
-            l1 = min(v1.shape[0],self.nLength)
-            l2 = min(v2.shape[0],self.nLength)
-            batchVec1[cnt,:l1,:] = v1[:l1]
-            batchVec2[cnt,:l2,:] = v2[:l2]
-            batchTruth[cnt] = +1.0 # 正解
-            cnt += 1
-
-        # 次に不正解を入れ込む
-        assert self.nBatch>1
-        cnt = -1
-        while True:
-            idx1 = random.randint(0,len(itemList1)-1)
-            idx2 = random.randint(0,len(itemList2)-1)
-            if idx1==idx2: continue
-            cnt += 1
-            if (nGood+cnt)>=self.nBatch: break
-            v1 = itemList1[idx1]
-            v2 = itemList2[idx2]
-            w1 = wordList1[idx1]
-            w2 = wordList2[idx2]
-            batchWord1.append(w1)
-            batchWord2.append(w2)
-            l1 = min(v1.shape[0],self.nLength)
-            l2 = min(v2.shape[0],self.nLength)
-            batchVec1[nGood + cnt,:l1] = v1[:l1]
-            batchVec2[nGood + cnt,:l2] = v2[:l2]
-            batchTruth[nGood + cnt] = -1.0 # 不正解
-
-        ### For debug
-        #for i in range(self.nBatch):
-        #    with open("temp/%d_wd.txt"%i,"w") as f:
-        #        f.write(unicode(batchWord1[i]).encode("shift-jis"))
-        #        f.write("\n")
-        #        f.write(unicode(batchWord2[i]).encode("shift-jis"))
-
-        #    np.savetxt("temp/%d_v1.csv"%i, batchVec1[i], delimiter=",")
-        #    np.savetxt("temp/%d_v2.csv"%i, batchVec2[i], delimiter=",")
-        #sys.exit(-1)
-        return batchTruth,batchVec1,batchVec2,batchWord1,batchWord2
-
-    def yieldOne(self):
+    def yieldOne(self,mode="all"):
         nGood = int(self.nBatch * self.goodFrac)
         nBad  = self.nBatch - nGood
+
+        targetLines = self.dAcc.getTargetLines(mode)
 
         while True:
             batchVec1  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
@@ -194,7 +109,7 @@ class net:
 
             # まずは正解を入れ込む
             cnt = 0
-            for i in np.random.randint(0,self.dAcc.nLines,nGood):
+            for i in random.sample(targetLines,nGood):
                 v1,v2 = self.dAcc.getColumnPairs_w2v(i,self.columnPairs)
                 w1,w2 = self.dAcc.getColumnPairs_str(i,self.columnPairs)
                 itemList1.append(v1)
@@ -233,8 +148,52 @@ class net:
 
             yield ({"input_1":batchVec1,"input_2":batchVec2},{"distance":batchTruth})
 
-    def train(self):
-        self.model.fit_generator(self.yieldOne(),steps_per_epoch=int(self.dAcc.nLines/self.nBatch),use_multiprocessing=True, max_queue_size=10, workers=1)
+    def buildModel(self):
+        def create_base_network(input_shape):
+            seq = Sequential()
+            seq.add(GRU(400,input_shape=input_shape,activation='tanh', recurrent_activation='hard_sigmoid'))
+            seq.add(Dense(32,activation=None,kernel_regularizer=l2(1e-3)))
+            seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=1)))
+            return seq
+        def euclidean_distance(vects):
+            x, y = vects
+            return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
+        def eucl_dist_output_shape(shapes):
+            shape1, shape2 = shapes
+            return (shape1[0], 1)
+
+        input_shape = (self.nLength,self.nDim)
+
+        inX1 = Input(input_shape,name="input_1")
+        inX2 = Input(input_shape,name="input_2")
+
+        base_network = create_base_network(input_shape)
+
+        outX1 = base_network(inX1)
+        outX2 = base_network(inX2)
+
+        distance = merge([outX1,outX2],mode = euclidean_distance, output_shape=eucl_dist_output_shape,name="distance")
+        model = Model(inputs=[inX1, inX2], outputs=distance)
+
+        optimizer = Adam(1e-4)
+        model.compile(loss="mean_squared_error",optimizer=optimizer)
+
+        model.summary()
+        self.model = model
+        return
+
+    def train(self,saveFolder="save"):
+        cp_cb = ModelCheckpoint(filepath = saveFolder+"/weights.{epoch:02d}.hdf5", monitor='loss', verbose=1, save_best_only=True, mode='auto')
+        tb_cb = TensorBoard(log_dir=saveFolder, histogram_freq=2)
+        self.model.fit_generator(generator=self.yieldOne("train"),
+                                 validation_data=self.yieldOne("valid"),
+                                 validation_steps=10,
+                                 epochs=10000000,
+                                 callbacks=[cp_cb,tb_cb],
+                                 steps_per_epoch=int(self.dAcc.nLines/self.nBatch),
+                                 use_multiprocessing=True, 
+                                 max_queue_size=10, 
+                                 workers=1)
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -250,4 +209,4 @@ if __name__=="__main__":
     d.loadW2V("wiki.w2v")
     #d.buildW2Vfile("all.csv",outPath="wiki.w2v")
     n = net(args,d,columnPairs=[u"Acquiror business description(s)",u"Target business description(s)"],goodFrac=0.5)
-    n.train()
+    n.train(saveFolder="train")
