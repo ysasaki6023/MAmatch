@@ -13,6 +13,14 @@ from keras.regularizers import l2
 import keras.backend as K
 from keras.callbacks import EarlyStopping, TensorBoard, ModelCheckpoint
 
+def memorize(f):
+    cache = {}
+    def helper(*args):
+        if args not in cache:
+            cache[args] = f(*args)
+        return cache[args]
+    return helper
+
 class DataAccessor:
     def __init__(self,verbose=False):
         self.randomSeed = 99 # これによって、Train/Testが変更されるので注意必要
@@ -41,10 +49,12 @@ class DataAccessor:
         self.w2v_model = word2vec.Word2Vec.load(fPath)
         return
 
+    @memorize
     def getColumnPairs_str(self,index,colPairs):
         d = self.d
         return d[colPairs[0]][index],d[colPairs[1]][index]
 
+    @memorize
     def getColumnPairs_w2v(self,index,colPairs):
         strPairs = self.getColumnPairs_str(index,colPairs)
         strPairs = [self.cleanUpStr(x) for x in strPairs]
@@ -122,7 +132,7 @@ class net:
                 l2 = min(v2.shape[0],self.nLength)
                 batchVec1[cnt,:l1,:] = v1[:l1]
                 batchVec2[cnt,:l2,:] = v2[:l2]
-                batchTruth[cnt] = +1.0 # 正解
+                batchTruth[cnt] = 0.0 # 正解: Cos similarity = 0
                 cnt += 1
 
             # 次に不正解を入れ込む
@@ -144,21 +154,30 @@ class net:
                 l2 = min(v2.shape[0],self.nLength)
                 batchVec1[nGood + cnt,:l1] = v1[:l1]
                 batchVec2[nGood + cnt,:l2] = v2[:l2]
-                batchTruth[nGood + cnt] = -1.0 # 不正解
+                batchTruth[nGood + cnt] = -2.0 # 不正解: Cos similarity = -2.0
 
             yield ({"input_1":batchVec1,"input_2":batchVec2},{"distance":batchTruth})
 
     def buildModel(self):
         def create_base_network(input_shape):
             seq = Sequential()
-            seq.add(GRU(400,input_shape=input_shape,activation='tanh', recurrent_activation='hard_sigmoid'))
-            seq.add(Dense(32,activation=None,kernel_regularizer=l2(1e-3)))
+            seq.add(GRU(16,input_shape=input_shape,activation='tanh', recurrent_activation='hard_sigmoid'))
+            seq.add(Dense(16,activation=None,kernel_regularizer=l2(1e-3)))
             seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=1)))
             return seq
         def euclidean_distance(vects):
             x, y = vects
             return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
         def eucl_dist_output_shape(shapes):
+            shape1, shape2 = shapes
+            return (shape1[0], 1)
+
+        def cosine_distance(vests):
+            x, y = vests
+            x = K.l2_normalize(x, axis=-1)
+            y = K.l2_normalize(y, axis=-1)
+            return (1.-K.mean(x * y, axis=-1))
+        def cos_dist_output_shape(shapes):
             shape1, shape2 = shapes
             return (shape1[0], 1)
 
@@ -172,10 +191,10 @@ class net:
         outX1 = base_network(inX1)
         outX2 = base_network(inX2)
 
-        distance = merge([outX1,outX2],mode = euclidean_distance, output_shape=eucl_dist_output_shape,name="distance")
+        distance = merge([outX1,outX2], mode = cosine_distance, output_shape=cos_dist_output_shape,name="distance")
         model = Model(inputs=[inX1, inX2], outputs=distance)
 
-        optimizer = Adam(1e-4)
+        optimizer = Adam(1e-3)
         model.compile(loss="mean_squared_error",optimizer=optimizer)
 
         model.summary()
@@ -184,7 +203,7 @@ class net:
 
     def train(self,saveFolder="save"):
         cp_cb = ModelCheckpoint(filepath = saveFolder+"/weights.{epoch:02d}.hdf5", monitor='loss', verbose=1, save_best_only=True, mode='auto')
-        tb_cb = TensorBoard(log_dir=saveFolder, histogram_freq=2)
+        tb_cb = TensorBoard(log_dir=saveFolder, histogram_freq=1)
         self.model.fit_generator(generator=self.yieldOne("train"),
                                  validation_data=self.yieldOne("valid"),
                                  validation_steps=10,
@@ -206,7 +225,7 @@ if __name__=="__main__":
     args = parser.parse_args()
     d = DataAccessor()
     d.loadCSV("all.csv")
-    d.loadW2V("wiki.w2v")
+    d.loadW2V("w2v/wiki.w2v")
     #d.buildW2Vfile("all.csv",outPath="wiki.w2v")
-    n = net(args,d,columnPairs=[u"Acquiror business description(s)",u"Target business description(s)"],goodFrac=0.5)
+    n = net(args,d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),goodFrac=0.5) # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
     n.train(saveFolder="train")
