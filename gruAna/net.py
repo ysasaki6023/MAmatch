@@ -5,13 +5,14 @@ import numpy as np
 import pandas as pd
 from gensim import corpora, models, similarities
 from gensim.models import word2vec
-from keras.layers import Input, Dense, LSTM, merge, Lambda, GRU
-#from keras.layers import Merge,Layer
+from keras.layers import Input, Dense, LSTM, merge, Lambda, GRU, Dot, Reshape, Concatenate, Flatten, Dropout, Bidirectional
+from keras.constraints import min_max_norm
 from keras.models import Model, Sequential
-from keras.optimizers import Adam
+from keras.optimizers import Adam, RMSprop
 from keras.regularizers import l2
 import keras.backend as K
 from keras.callbacks import EarlyStopping, TensorBoard, ModelCheckpoint
+#from keras.utils.visualize_util import plot
 
 def memorize(f):
     cache = {}
@@ -35,7 +36,7 @@ class DataAccessor:
     def buildW2Vfile(self,filePath,outPath):
         logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
         sentences = word2vec.LineSentence(filePath)
-        model = word2vec.Word2Vec(sentences, sg=1, size=self.nDim,min_count=1,window=10,hs=1)
+        model = word2vec.Word2Vec(sentences, size=self.nDim,min_count=100,window=5)
         model.save(outPath)
         return
 
@@ -60,15 +61,21 @@ class DataAccessor:
         strPairs = [self.cleanUpStr(x) for x in strPairs]
         return self.str_to_w2v(strPairs[0]),self.str_to_w2v(strPairs[1])
 
+    def getColumnPairs_w2v_fixedLength(self,index,colPairs,fixedLength):
+        strPairs = self.getColumnPairs_str(index,colPairs)
+        strPairs = [self.cleanUpStr(x) for x in strPairs]
+        return self.str_to_w2v(strPairs[0],fixedLength=fixedLength),self.str_to_w2v(strPairs[1],fixedLength=fixedLength)
+
     def cleanUpStr(self,inStr):
         inStr = inStr.replace("\r\n","").replace("\n","")
         inStr = re.sub(self.puncReStr," ",inStr)
         inStr = re.sub("\s+"," ",inStr).strip().lower()
         return inStr
 
-    def str_to_w2v(self,inStr):
+    def str_to_w2v(self,inStr,fixedLength=None):
         inStr = inStr.split()
-        res = np.zeros( (len(inStr), self.nDim), dtype=np.float32)
+        if fixedLength:  res = np.zeros( (fixedLength, self.nDim), dtype=np.float32)
+        else:            res = np.zeros( (len(inStr) , self.nDim), dtype=np.float32)
         for i,w in enumerate(inStr):
             try:
                 res[i,:] = self.w2v_model[w]
@@ -96,6 +103,7 @@ class net:
         self.nLength = args.nLength
         self.columnPairs = columnPairs
         self.goodFrac = goodFrac
+        self.learnRate = args.learnRate
         self.buildModel()
         return
 
@@ -104,11 +112,13 @@ class net:
         nBad  = self.nBatch - nGood
 
         targetLines = self.dAcc.getTargetLines(mode)
+        if mode=="train": self.trainLines = targetLines
+        if mode=="valid": self.validLines = targetLines
 
         while True:
             batchVec1  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
             batchVec2  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
-            batchTruth = np.zeros( (self.nBatch, 1)        , dtype=np.float32)
+            batchTruth = np.zeros( (self.nBatch, 1)        , dtype=np.int32)
 
             itemList1 = []
             itemList2 = []
@@ -132,7 +142,7 @@ class net:
                 l2 = min(v2.shape[0],self.nLength)
                 batchVec1[cnt,:l1,:] = v1[:l1]
                 batchVec2[cnt,:l2,:] = v2[:l2]
-                batchTruth[cnt] = 0.0 # 正解: Cos similarity = 0
+                batchTruth[cnt] = 1 # 正解: Cos similarity = 0
                 cnt += 1
 
             # 次に不正解を入れ込む
@@ -154,20 +164,23 @@ class net:
                 l2 = min(v2.shape[0],self.nLength)
                 batchVec1[nGood + cnt,:l1] = v1[:l1]
                 batchVec2[nGood + cnt,:l2] = v2[:l2]
-                batchTruth[nGood + cnt] = -2.0 # 不正解: Cos similarity = -2.0
+                batchTruth[nGood + cnt] = 0 # 不正解: Cos similarity = 2.0
 
             yield ({"input_1":batchVec1,"input_2":batchVec2},{"distance":batchTruth})
 
     def buildModel(self):
         def create_base_network(input_shape):
             seq = Sequential()
-            seq.add(GRU(16,input_shape=input_shape,activation='tanh', recurrent_activation='hard_sigmoid'))
-            seq.add(Dense(16,activation=None,kernel_regularizer=l2(1e-3)))
-            seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=1)))
+            seq.add(GRU(400,activation='tanh', recurrent_activation='hard_sigmoid',input_shape=input_shape))
+            seq.add(Dropout(rate=0.5))
+            seq.add(Dense(64,activation="tanh",init="he_normal",use_bias=True,bias_initializer="uniform"))
+            seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=-1)))
             return seq
+
         def euclidean_distance(vects):
             x, y = vects
-            return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
+            return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=-1), K.epsilon()))
+
         def eucl_dist_output_shape(shapes):
             shape1, shape2 = shapes
             return (shape1[0], 1)
@@ -176,8 +189,21 @@ class net:
             x, y = vests
             x = K.l2_normalize(x, axis=-1)
             y = K.l2_normalize(y, axis=-1)
-            return (1.-K.mean(x * y, axis=-1))
+            return (1.-K.sum(x * y, axis=-1))
+
         def cos_dist_output_shape(shapes):
+            shape1, shape2 = shapes
+            return (shape1[0], 1)
+
+        def siam_distance(vests):
+            x, y = vests
+            x = K.l2_normalize(x, axis=-1)
+            y = K.l2_normalize(y, axis=-1)
+            h = K.sum(x*y,axis=-1,keepdims=True) # cosine
+            return 0.25 * ((1.-h)**2)
+            #return (1.-K.sum(x * y, axis=-1))
+
+        def siam_dist_output_shape(shapes):
             shape1, shape2 = shapes
             return (shape1[0], 1)
 
@@ -191,35 +217,56 @@ class net:
         outX1 = base_network(inX1)
         outX2 = base_network(inX2)
 
-        distance = merge([outX1,outX2], mode = cosine_distance, output_shape=cos_dist_output_shape,name="distance")
+        distance = merge([outX1,outX2], mode = siam_distance, output_shape=siam_dist_output_shape, name="distance")
+
         model = Model(inputs=[inX1, inX2], outputs=distance)
 
-        optimizer = Adam(1e-3)
-        model.compile(loss="mean_squared_error",optimizer=optimizer)
+        optimizer = Adam(self.learnRate)
+        model.compile(loss="binary_crossentropy",optimizer=optimizer,metrics=["binary_accuracy"])
 
         model.summary()
         self.model = model
+        #plot(model, to_file="model.png", show_shapes=True)
+
+        self.outX1 = Model(inputs=inX1,outputs=outX1)
+        self.outX2 = Model(inputs=inX2,outputs=outX2)
         return
 
     def train(self,saveFolder="save"):
         cp_cb = ModelCheckpoint(filepath = saveFolder+"/weights.{epoch:02d}.hdf5", monitor='loss', verbose=1, save_best_only=True, mode='auto')
         tb_cb = TensorBoard(log_dir=saveFolder, histogram_freq=1)
-        self.model.fit_generator(generator=self.yieldOne("train"),
-                                 validation_data=self.yieldOne("valid"),
-                                 validation_steps=10,
-                                 epochs=10000000,
-                                 callbacks=[cp_cb,tb_cb],
-                                 steps_per_epoch=int(self.dAcc.nLines/self.nBatch),
-                                 use_multiprocessing=True, 
-                                 max_queue_size=10, 
-                                 workers=1)
+        while True:
+            self.model.fit_generator(generator=self.yieldOne("train"),
+                                    validation_data=self.yieldOne("valid"),
+                                    validation_steps=10,
+                                    epochs=100000000,
+                                    callbacks=[cp_cb,tb_cb],
+                                    steps_per_epoch=int(self.dAcc.nLines*(1.-self.dAcc.validFrac)/self.nBatch),
+                                    use_multiprocessing=True, 
+                                    max_queue_size=10, 
+                                    workers=1)
+            for idx in range(20):
+                x = self.dAcc.getColumnPairs_w2v_fixedLength(idx,self.columnPairs,self.nLength)
+                w = self.dAcc.getColumnPairs_str            (idx,self.columnPairs)
+                y1 = self.outX1.predict({"input_1":np.expand_dims(x[0],axis=0)})
+                y2 = self.outX2.predict({"input_2":np.expand_dims(x[1],axis=0)})
+                res = self.model.predict({"input_1":np.expand_dims(x[0],axis=0),"input_2":np.expand_dims(x[1],axis=0)})
+                print idx
+                print w[0]
+                #print x[0]
+                print w[1]
+                #print x[1]
+                print y1
+                print y2
+                print res
+                print
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode","-m",dest="mode",type=str,choices=["train"],default="train")
-    parser.add_argument("--nBatch" ,"-b",dest="nBatch",type=int,default=64)
-    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=20)
-    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-3)
+    parser.add_argument("--nBatch" ,"-b",dest="nBatch",type=int,default=256)
+    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=10)
+    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-4)
     parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="save")
 
     args = parser.parse_args()
