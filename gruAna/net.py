@@ -13,7 +13,7 @@ from keras.regularizers import l2
 import keras.backend as K
 from keras.callbacks import EarlyStopping, TensorBoard, ModelCheckpoint
 import tensorflow as tf
-from keras.backend import import tensorflow_backend
+from keras.backend import tensorflow_backend
 
 config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))
 session = tf.Session(config=config)
