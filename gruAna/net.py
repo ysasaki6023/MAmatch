@@ -22,7 +22,7 @@ def memorize(f):
         return cache[args]
     return helper
 
-class DataAccessor:
+class DataAccessor(object):
     def __init__(self,verbose=False):
         self.randomSeed = 99 # これによって、Train/Testが変更されるので注意必要
         self.validFrac = 0.1 # Validationで使う割合
@@ -95,7 +95,7 @@ class DataAccessor:
             elif mode=="valid": targetLines = validLines
         return targetLines
 
-class net:
+class net(object):
     def __init__(self,args,dAcc,columnPairs,goodFrac=0.5):
         self.dAcc    = dAcc
         self.nDim    = dAcc.nDim
@@ -172,24 +172,6 @@ class net:
             seq.add(Dense(64,activation="tanh",kernel_initializer="he_normal",use_bias=True,bias_initializer="uniform"))
             seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=-1)))
             return seq
-
-        def euclidean_distance(vects):
-            x, y = vects
-            return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=-1), K.epsilon()))
-
-        def eucl_dist_output_shape(shapes):
-            shape1, shape2 = shapes
-            return (shape1[0], 1)
-
-        def cosine_distance(vests):
-            x, y = vests
-            x = K.l2_normalize(x, axis=-1)
-            y = K.l2_normalize(y, axis=-1)
-            return (1.-K.sum(x * y, axis=-1))
-
-        def cos_dist_output_shape(shapes):
-            shape1, shape2 = shapes
-            return (shape1[0], 1)
 
         def siam_distance(vests):
             x, y = vests
