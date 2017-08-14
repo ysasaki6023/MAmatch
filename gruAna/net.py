@@ -33,10 +33,10 @@ class DataAccessor(object):
         self.verbose = verbose
         return
 
-    def buildW2Vfile(self,filePath,outPath):
+    def buildW2Vfile(self,filePath,outPath,min_count=1000,window=5):
         logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
         sentences = word2vec.LineSentence(filePath)
-        model = word2vec.Word2Vec(sentences, size=self.nDim,min_count=100,window=5)
+        model = word2vec.Word2Vec(sentences, size=self.nDim,min_count=min_count,window=window)
         model.save(outPath)
         return
 
