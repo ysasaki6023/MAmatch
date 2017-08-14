@@ -122,10 +122,7 @@ class net:
 
             itemList1 = []
             itemList2 = []
-            wordList1 = []
-            wordList2 = []
-            batchWord1 = []
-            batchWord2 = []
+            wordLists = []
 
             # まずは正解を入れ込む
             cnt = 0
@@ -134,37 +131,36 @@ class net:
                 w1,w2 = self.dAcc.getColumnPairs_str(i,self.columnPairs)
                 itemList1.append(v1)
                 itemList2.append(v2)
-                wordList1.append(w1)
-                wordList2.append(w2)
-                batchWord1.append(w1)
-                batchWord2.append(w2)
+                wordLists.append((w1,w2))
                 l1 = min(v1.shape[0],self.nLength)
                 l2 = min(v2.shape[0],self.nLength)
                 batchVec1[cnt,:l1,:] = v1[:l1]
                 batchVec2[cnt,:l2,:] = v2[:l2]
-                batchTruth[cnt] = 1 # 正解: Cos similarity = 0
+                batchTruth[cnt] = 1 # 正解
                 cnt += 1
 
             # 次に不正解を入れ込む
             assert self.nBatch>1
             cnt = -1
-            while True:
+            for _ in range(nBad*2): # nBadの2倍を上限にループ。すべての行が同じになっている場合に発生する無限ループへ対処
                 idx1 = random.randint(0,len(itemList1)-1)
                 idx2 = random.randint(0,len(itemList2)-1)
                 if idx1==idx2: continue
+                w1 = wordLists[idx1][0]
+                w2 = wordLists[idx2][1]
+                if (w1,w2) in wordLists:continue # この条件を満たすと、正解データになってしまうので削除。データの中には繰り返しが多く含まれているので、こうなるパターンもある。
                 cnt += 1
                 if (nGood+cnt)>=self.nBatch: break
                 v1 = itemList1[idx1]
                 v2 = itemList2[idx2]
-                w1 = wordList1[idx1]
-                w2 = wordList2[idx2]
-                batchWord1.append(w1)
-                batchWord2.append(w2)
                 l1 = min(v1.shape[0],self.nLength)
                 l2 = min(v2.shape[0],self.nLength)
                 batchVec1[nGood + cnt,:l1] = v1[:l1]
                 batchVec2[nGood + cnt,:l2] = v2[:l2]
-                batchTruth[nGood + cnt] = 0 # 不正解: Cos similarity = 2.0
+                batchTruth[nGood + cnt] = 0 # 不正解
+            else:
+                print "too much loop. cnt=",cnt
+                # この場合、学習はゼロベクトルだと不正解とみなすような学習になる。それはそれで良い気がするので、特に追加加工などは行わない
 
             yield ({"input_1":batchVec1,"input_2":batchVec2},{"distance":batchTruth})
 
@@ -173,7 +169,7 @@ class net:
             seq = Sequential()
             seq.add(GRU(400,activation='tanh', recurrent_activation='hard_sigmoid',input_shape=input_shape))
             seq.add(Dropout(rate=0.5))
-            seq.add(Dense(64,activation="tanh",init="he_normal",use_bias=True,bias_initializer="uniform"))
+            seq.add(Dense(64,activation="tanh",kernel_initializer="he_normal",use_bias=True,bias_initializer="uniform"))
             seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=-1)))
             return seq
 
@@ -201,7 +197,6 @@ class net:
             y = K.l2_normalize(y, axis=-1)
             h = K.sum(x*y,axis=-1,keepdims=True) # cosine
             return 0.25 * ((1.-h)**2)
-            #return (1.-K.sum(x * y, axis=-1))
 
         def siam_dist_output_shape(shapes):
             shape1, shape2 = shapes
@@ -217,7 +212,7 @@ class net:
         outX1 = base_network(inX1)
         outX2 = base_network(inX2)
 
-        distance = merge([outX1,outX2], mode = siam_distance, output_shape=siam_dist_output_shape, name="distance")
+        distance = Lambda(siam_distance, output_shape=siam_dist_output_shape, name="distance")([outX1,outX2])
 
         model = Model(inputs=[inX1, inX2], outputs=distance)
 
@@ -273,6 +268,5 @@ if __name__=="__main__":
     d = DataAccessor()
     d.loadCSV("all.csv")
     d.loadW2V("w2v/wiki.w2v")
-    #d.buildW2Vfile("all.csv",outPath="wiki.w2v")
     n = net(args,d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),goodFrac=0.5) # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
     n.train(saveFolder="train")
