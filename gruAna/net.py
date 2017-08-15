@@ -33,7 +33,7 @@ class DataAccessor(object):
     def __init__(self,verbose=False):
         self.randomSeed = 99 # これによって、Train/Testが変更されるので注意必要
         self.validFrac = 0.1 # Validationで使う割合
-        self.nDim = 100
+        self.nW2VDim = 100
         self.puncReStr = string.punctuation
         self.puncReStr = "".join([x for x in self.puncReStr if x not in ["-","'"]])
         self.puncReStr = r"[%s]"%self.puncReStr
@@ -43,7 +43,7 @@ class DataAccessor(object):
     def buildW2Vfile(self,filePath,outPath,min_count=1000,window=5):
         logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
         sentences = word2vec.LineSentence(filePath)
-        model = word2vec.Word2Vec(sentences, size=self.nDim,min_count=min_count,window=window)
+        model = word2vec.Word2Vec(sentences, size=self.nW2VDim,min_count=min_count,window=window)
         model.save(outPath)
         return
 
@@ -81,8 +81,8 @@ class DataAccessor(object):
 
     def str_to_w2v(self,inStr,fixedLength=None):
         inStr = inStr.split()
-        if fixedLength:  res = np.zeros( (fixedLength, self.nDim), dtype=np.float32)
-        else:            res = np.zeros( (len(inStr) , self.nDim), dtype=np.float32)
+        if fixedLength:  res = np.zeros( (fixedLength, self.nW2VDim), dtype=np.float32)
+        else:            res = np.zeros( (len(inStr) , self.nW2VDim), dtype=np.float32)
         for i,w in enumerate(inStr):
             try:
                 res[i,:] = self.w2v_model[w]
@@ -105,8 +105,9 @@ class DataAccessor(object):
 class net(object):
     def __init__(self,args,dAcc,columnPairs,goodFrac=0.5):
         self.dAcc    = dAcc
-        self.nDim    = dAcc.nDim
+        self.nW2VDim = dAcc.nW2VDim
         self.nBatch  = args.nBatch
+        self.nGRU    = args.nGRU
         self.nLength = args.nLength
         self.columnPairs = columnPairs
         self.goodFrac = goodFrac
@@ -123,8 +124,8 @@ class net(object):
         if mode=="valid": self.validLines = targetLines
 
         while True:
-            batchVec1  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
-            batchVec2  = np.zeros( (self.nBatch, self.nLength, self.nDim), dtype=np.float32)
+            batchVec1  = np.zeros( (self.nBatch, self.nLength, self.nW2VDim), dtype=np.float32)
+            batchVec2  = np.zeros( (self.nBatch, self.nLength, self.nW2VDim), dtype=np.float32)
             batchTruth = np.zeros( (self.nBatch, 1)        , dtype=np.int32)
 
             itemList1 = []
@@ -174,7 +175,7 @@ class net(object):
     def buildModel(self):
         def create_base_network(input_shape):
             seq = Sequential()
-            seq.add(GRU(400,activation='tanh', recurrent_activation='hard_sigmoid',input_shape=input_shape))
+            seq.add(Bidirectional(GRU(self.nGRU,activation='tanh', recurrent_activation='hard_sigmoid'),input_shape=input_shape))
             seq.add(Dropout(rate=0.5))
             seq.add(Dense(64,activation="tanh",kernel_initializer="he_normal",use_bias=True,bias_initializer="uniform"))
             seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=-1)))
@@ -191,7 +192,7 @@ class net(object):
             shape1, shape2 = shapes
             return (shape1[0], 1)
 
-        input_shape = (self.nLength,self.nDim)
+        input_shape = (self.nLength,self.nW2VDim)
 
         inX1 = Input(input_shape,name="input_1")
         inX2 = Input(input_shape,name="input_2")
@@ -249,8 +250,9 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode","-m",dest="mode",type=str,choices=["train"],default="train")
     parser.add_argument("--nBatch" ,"-b",dest="nBatch",type=int,default=256)
-    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=10)
-    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-4)
+    parser.add_argument("--nGRU"   ,"-g",dest="nGRU"  ,type=int,default=256)
+    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=20)
+    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-5)
     parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="save")
 
     args = parser.parse_args()
