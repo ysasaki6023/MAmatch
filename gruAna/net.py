@@ -172,6 +172,11 @@ class net(object):
 
             yield ({"input_1":batchVec1,"input_2":batchVec2},{"distance":batchTruth})
 
+    def reloadModel(self,fPath):
+        self.model.load_weights(fPath)
+        print "model loaded from %s"%fPath
+        return
+
     def buildModel(self):
         def create_base_network(input_shape):
             seq = Sequential()

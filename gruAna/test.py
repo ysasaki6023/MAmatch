@@ -14,10 +14,11 @@ def memorize(f):
 
 class net_test(net):
     def __init__(self,args,dAcc,columnPairs):
+        self.nW2VDim = dAcc.nW2VDim
         self.reload  = args.reload
         self.nBatch  = args.nBatch
         self.nLength = args.nLength
-        self.nDim = 100
+        self.nGRU = args.nGRU
         self.learnRate = 0
         self.dAcc = dAcc
         self.columnPairs = columnPairs
@@ -79,15 +80,17 @@ class net_test(net):
 
 
 if __name__=="__main__":
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--nBatch" ,"-b",dest="nBatch",type=int,default=256)
-    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=10)
+    parser.add_argument("--nGRU"   ,"-g",dest="nGRU"  ,type=int,default=512)
+    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=20)
     parser.add_argument("--reload","-r",dest="reload",type=str,default=None)
 
     args = parser.parse_args()
     d = DataAccessor()
     d.loadCSV("all.csv")
-    d.loadW2V("w2v/wiki.w2v")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
     t = net_test(args,d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"))
     t.test("Chemicals distributor, Rubber and latex products distributor")
     t.test("Biopharmaceuticals developer, Biopharmaceuticals manufacturer, Consumer healthcare products manufacturer, Infant food manufacturer, Pharmaceutical products manufacturer")

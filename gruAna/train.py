@@ -29,6 +29,7 @@ if __name__=="__main__":
     parser.add_argument("--nGRU"   ,"-g",dest="nGRU"  ,type=int,default=512)
     parser.add_argument("--nLength","-l",dest="nLength",type=int,default=20)
     parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-4)
+    parser.add_argument("--reload",dest="reload",type=str,default=None)
     parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="save")
 
     args = parser.parse_args()
@@ -36,5 +37,8 @@ if __name__=="__main__":
     d.loadCSV("all.csv")
     d.loadW2V("w2v/wiki_mincount100.w2v")
     n = net_train(args,d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),goodFrac=0.5) # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+    if args.reload:
+        n.reloadModel(args.reload)
     #n.train(saveFolder="models/test")
-    n.train(saveFolder="models/BusinessDescription_minCount100_nLength20_nGRU512")
+    #n.train(saveFolder="models/BusinessDescription_minCount100_nLength20_nGRU512")
+    n.train(saveFolder=args.saveFolder)
