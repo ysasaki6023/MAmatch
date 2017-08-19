@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os,sys,argparse,re,string,logging,random
+import os,sys,argparse,re,string,logging,random,csv
 #import tensorflow as tf
 import numpy as np
 import pandas as pd
@@ -103,15 +103,17 @@ class DataAccessor(object):
         return targetLines
 
 class net(object):
-    def __init__(self,args,dAcc,columnPairs,goodFrac=0.5):
+    def __init__(self,dAcc,columnPairs,goodFrac=0.5,nBatch=256,nGRU=512,nLength=20,learnRate=1e-4,saveFolder="save",asymDistance=False):
         self.dAcc    = dAcc
         self.nW2VDim = dAcc.nW2VDim
-        self.nBatch  = args.nBatch
-        self.nGRU    = args.nGRU
-        self.nLength = args.nLength
+        self.nBatch  = nBatch
+        self.nGRU    = nGRU
+        self.nLength = nLength
         self.columnPairs = columnPairs
         self.goodFrac = goodFrac
-        self.learnRate = args.learnRate
+        self.learnRate = learnRate
+        self.saveFolder = saveFolder
+        self.asymDistance = asymDistance
         self.buildModel()
         return
 
@@ -135,17 +137,21 @@ class net(object):
             # まずは正解を入れ込む
             cnt = 0
             for i in random.sample(targetLines,nGood):
-                v1,v2 = self.dAcc.getColumnPairs_w2v(i,self.columnPairs)
-                w1,w2 = self.dAcc.getColumnPairs_str(i,self.columnPairs)
-                itemList1.append(v1)
-                itemList2.append(v2)
-                wordLists.append((w1,w2))
-                l1 = min(v1.shape[0],self.nLength)
-                l2 = min(v2.shape[0],self.nLength)
-                batchVec1[cnt,:l1,:] = v1[:l1]
-                batchVec2[cnt,:l2,:] = v2[:l2]
-                batchTruth[cnt] = 1 # 正解
-                cnt += 1
+                try:
+                    v1,v2 = self.dAcc.getColumnPairs_w2v(i,self.columnPairs)
+                    w1,w2 = self.dAcc.getColumnPairs_str(i,self.columnPairs)
+                    itemList1.append(v1)
+                    itemList2.append(v2)
+                    wordLists.append((w1,w2))
+                    l1 = min(v1.shape[0],self.nLength)
+                    l2 = min(v2.shape[0],self.nLength)
+                    batchVec1[cnt,:l1,:] = v1[:l1]
+                    batchVec2[cnt,:l2,:] = v2[:l2]
+                    batchTruth[cnt] = 1 # 正解
+                    cnt += 1
+                except:
+                    #print "error occured"
+                    continue
 
             # 次に不正解を入れ込む
             assert self.nBatch>1
@@ -182,6 +188,7 @@ class net(object):
             seq = Sequential()
             seq.add(Bidirectional(GRU(self.nGRU,activation='tanh', recurrent_activation='hard_sigmoid'),input_shape=input_shape))
             seq.add(Dropout(rate=0.5))
+            #seq.add(Dense(64,activation=None,kernel_initializer="he_normal",use_bias=True,bias_initializer="uniform",kernel_regularizer=l2(1e-6),bias_regularizer=l2(1e-6)))
             seq.add(Dense(64,activation="tanh",kernel_initializer="he_normal",use_bias=True,bias_initializer="uniform"))
             seq.add(Lambda(lambda  x: K.l2_normalize(x,axis=-1)))
             return seq
@@ -193,9 +200,31 @@ class net(object):
             h = K.sum(x*y,axis=-1,keepdims=True) # cosine
             return 0.25 * ((1.-h)**2)
 
+        def eucl_distance(vects):
+            x, y = vects
+            return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
+
+        def eucl_dist_output_shape(shapes):
+            shape1, shape2 = shapes
+            return (shape1[0], 1)
+
         def siam_dist_output_shape(shapes):
             shape1, shape2 = shapes
             return (shape1[0], 1)
+
+
+        def contrastive_loss(y_true, y_pred):
+            '''Contrastive loss from Hadsell-et-al.'06
+            http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
+            '''
+            margin = 1
+            return K.mean(y_true * K.square(y_pred) + (1 - y_true) * K.square(K.maximum(margin - y_pred, 0)))
+
+        def compute_accuracy(y_true, y_pred):
+            '''Compute classification accuracy with a fixed threshold on distances.
+            '''
+            thres = 0.5
+            return K.mean(K.equal(K.greater(y_true,0.5),K.less(y_pred,thres)))
 
         input_shape = (self.nLength,self.nW2VDim)
 
@@ -207,24 +236,27 @@ class net(object):
         outX1 = base_network(inX1)
         outX2 = base_network(inX2)
 
-        distance = Lambda(siam_distance, output_shape=siam_dist_output_shape, name="distance")([outX1,outX2])
+        if self.asymDistance:
+            outX2 = Dense(64,activation=None)(outX2) # ここがv3.0での唯一の変更点
+
+        distance = Lambda(eucl_distance, output_shape=eucl_dist_output_shape, name="distance")([outX1,outX2])
 
         model = Model(inputs=[inX1, inX2], outputs=distance)
 
         optimizer = Adam(self.learnRate)
-        model.compile(loss="binary_crossentropy",optimizer=optimizer,metrics=["binary_accuracy"])
+        #model.compile(loss="binary_crossentropy",optimizer=optimizer,metrics=["binary_accuracy"])
+        model.compile(loss=contrastive_loss,optimizer=optimizer,metrics=[compute_accuracy])
 
         model.summary()
         self.model = model
-        #plot(model, to_file="model.png", show_shapes=True)
 
         self.outX1 = Model(inputs=inX1,outputs=outX1)
         self.outX2 = Model(inputs=inX2,outputs=outX2)
         return
 
-    def train(self,saveFolder="save"):
-        cp_cb = ModelCheckpoint(filepath = saveFolder+"/weights.{epoch:02d}.hdf5", monitor='loss', verbose=1, save_best_only=True, mode='auto')
-        tb_cb = TensorBoard(log_dir=saveFolder, histogram_freq=1)
+    def train(self):
+        cp_cb = ModelCheckpoint(filepath = self.saveFolder+"/weights.{epoch:02d}.hdf5", monitor='loss', verbose=1, save_best_only=True, mode='auto')
+        tb_cb = TensorBoard(log_dir=self.saveFolder, histogram_freq=1)
         while True:
             self.model.fit_generator(generator=self.yieldOne("train"),
                                     validation_data=self.yieldOne("valid"),
@@ -251,18 +283,186 @@ class net(object):
                 print res
                 print
 
-if __name__=="__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode","-m",dest="mode",type=str,choices=["train"],default="train")
-    parser.add_argument("--nBatch" ,"-b",dest="nBatch",type=int,default=256)
-    parser.add_argument("--nGRU"   ,"-g",dest="nGRU"  ,type=int,default=256)
-    parser.add_argument("--nLength","-l",dest="nLength",type=int,default=20)
-    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-5)
-    parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="save")
+    def testOne(self,txt):
+        vec = self.dAcc.str_to_w2v(txt,fixedLength=self.nLength)
+        y1 = self.outX1.predict({"input_1":np.expand_dims(vec,axis=0)}) # こちらはoutX1を使用
+        return y1[0]
 
-    args = parser.parse_args()
+    def testAll(self,y1):
+        pos = 0
+        score = []
+        words = []
+        #index = []
+
+        while pos<self.dAcc.nLines:
+            vList = []
+            num_processed = 0
+            for i in range(self.nBatch):
+                if pos+i>=self.dAcc.nLines:
+                    vList.append(v) # このwhileループがスタートしているということは、vは少なくとも1回は呼ばれているはず。それをダミーとして入れ込む
+                    continue
+                w = self.dAcc.getColumnPairs_str(pos+i,self.columnPairs)
+                w = w[1] # 一応、買われた側の値を使う
+                v = self.dAcc.str_to_w2v(w,fixedLength=self.nLength)
+                words.append(w)
+                vList.append(v)
+                #index.append(i+pos)
+                num_processed += 1
+            vList = np.array(vList)
+            y2 = self.outX2.predict({"input_2":vList}) # y2側は、outX2で計算すること
+            #sc = np.dot(y2,y1) 
+            sc = np.linalg.norm(y2-y1,axis=1)
+            for i in range(num_processed):
+                score.append(sc[i])
+            pos += num_processed
+        return score,words
+
+    def testByIndex(self,idx,nMax=10):
+        txt  = self.dAcc.d[self.columnPairs[0]][idx]
+        name = self.dAcc.d["Acquiror name"][idx]
+        ret,_ = self.test(txt,nMax=nMax,verbose=False)
+        header = (idx,name,txt)
+        print
+        print
+        print "match for :\t",name
+        print txt
+        print "-----"
+        for val in ret:
+            cnt, score, targetName,words = val
+            print cnt,"\t",score,"\t",targetName,":\t\t",words
+        print
+        print
+        return ret,header
+
+    def test(self,txt,nMax=10,verbose=True):
+        # txtに基づいて相性の良いindexを5件選定
+        y1 = self.testOne(txt) # まず、入力されたものを変換
+        score, words = self.testAll(y1)
+
+        if verbose:
+            print
+            print "match for :",txt
+        header = txt
+        cnt = 0
+        goodOnes = []
+        ret = []
+        for idx in np.argsort(score)[::+1]:
+            if words[idx] in goodOnes: continue
+            if verbose:
+                print cnt+1,"\t",score[idx],"\t",self.dAcc.d["Target name"][idx],":\t\t",words[idx]
+            else:
+                ret.append( (cnt+1,score[idx],self.dAcc.d["Target name"][idx],words[idx]) )
+            goodOnes.append(words[idx])
+            cnt += 1
+            if cnt>=nMax: break
+        return ret,header
+
+def train_v3_0():
     d = DataAccessor()
     d.loadCSV("all.csv")
-    d.loadW2V("w2v/wiki.w2v")
-    n = net(args,d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),goodFrac=0.5) # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
-    n.train(saveFolder="train")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=5,
+            asymDistance = True,
+            saveFolder="models/v3.0_BusinessDescription_minCount100_nLength5_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+    n.train()
+
+def test_v3_0(ver):
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=5,
+            asymDistance = True)
+    n.reloadModel("models/v3.0_BusinessDescription_minCount100_nLength5_nGRU512/weights.%d.hdf5"%ver)
+
+    for i in (1,10,50,100,300,500,700,1000,3000,5000,7000,9000,10000,30000,50000,70000):
+        n.testByIndex(i)
+
+
+    #print
+    #n.test("Chemicals distributor, Rubber and latex products distributor")
+    #n.test("Biopharmaceuticals developer, Biopharmaceuticals manufacturer, Consumer healthcare products manufacturer, Infant food manufacturer, Pharmaceutical products manufacturer")
+    #n.test("Food condiments and sauces manufacturer holding company, Soft and spreadable cheeses manufacturer holding company, Soft drinks manufacturer holding company")
+    #n.test("Broadband telecommunications services holding company, Cable television services holding company, High-speed data and voice services holding company, Wireless backhaul services holding company")
+    #n.test("Pharmaceutical solutions research and development services, Pharmaceuticals manufacturer")
+
+def train_v3_1():
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=20,
+            asymDistance = True,
+            saveFolder="models/v3.1_BusinessDescription_minCount100_nLength20_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+    n.train()
+
+def test_v3_1(ver):
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror business description(s)",u"Target business description(s)"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=20,
+            asymDistance = True)
+    n.reloadModel("models/v3.1_BusinessDescription_minCount100_nLength20_nGRU512/weights.%d.hdf5"%ver)
+
+    res = []
+    for i in (1,10,50,100,300,500,700,1000,3000,5000,7000,9000,10000,30000,50000,70000):
+        res.append(n.testByIndex(i))
+
+    for i,rr in enumerate(res):
+        ret,header = rr
+        idx,AcqName,words1 = header
+        with open("log/%d.csv"%idx,"w") as f:
+            c = csv.writer(f)
+            c.writerow(["","",AcqName,words1])
+            for cnt, score, targetName, words2 in ret:
+                c.writerow([cnt,score,targetName,words2])
+
+    return
+
+    n.test("Rubber and latex products distributor")
+    n.test("Consumer healthcare products manufacturer")
+    n.test("Soft drinks manufacturer holding company")
+    n.test("High-speed data and voice services holding company, Wireless internet connection services holding company")
+    n.test("Pharmaceutical solutions research and development services")
+
+
+
+def train_v3_2():
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror overview",u"Target overview"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=100,
+            asymDistance = True,
+            saveFolder="models/v3.2_Overview_minCount100_nLength100_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+    n.train()
+
+if __name__=="__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode" ,"-m",dest="mode",type=str,default="dummy")
+    parser.add_argument("--ver"  ,"-v",dest="ver" ,type=int,default=0)
+    args = parser.parse_args()
+
+    if   args.mode=="train_v3.0": train_v3_0()
+    elif args.mode=="test_v3.0" : test_v3_0(args.ver)
+    elif args.mode=="train_v3.1": train_v3_1()
+    elif args.mode=="test_v3.1" : test_v3_1(args.ver)
+    elif args.mode=="train_v3.2": train_v3_2()
+    elif args.mode=="test_v3.2" : test_v3_2(args.ver)
