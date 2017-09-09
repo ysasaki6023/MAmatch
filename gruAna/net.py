@@ -66,11 +66,13 @@ class DataAccessor(object):
     def getColumnPairs_w2v(self,index,colPairs):
         strPairs = self.getColumnPairs_str(index,colPairs)
         strPairs = [self.cleanUpStr(x) for x in strPairs]
-        return self.str_to_w2v(strPairs[0]),self.str_to_w2v(strPairs[1])
+        ret = self.str_to_w2v(strPairs[0]),self.str_to_w2v(strPairs[1])
+        return ret
 
     def getColumnPairs_w2v_fixedLength(self,index,colPairs,fixedLength):
         strPairs = self.getColumnPairs_str(index,colPairs)
         strPairs = [self.cleanUpStr(x) for x in strPairs]
+        #strPairs = strPairs[-fixedLength:]
         return self.str_to_w2v(strPairs[0],fixedLength=fixedLength),self.str_to_w2v(strPairs[1],fixedLength=fixedLength)
 
     def cleanUpStr(self,inStr):
@@ -175,6 +177,9 @@ class net(object):
             else:
                 print "too much loop. cnt=",cnt
                 # この場合、学習はゼロベクトルだと不正解とみなすような学習になる。それはそれで良い気がするので、特に追加加工などは行わない
+            #print "batchTruth=",batchTruth
+            #print "batchVec1=",batchVec1
+            #print "batchVec2=",batchVec2
 
             yield ({"input_1":batchVec1,"input_2":batchVec2},{"distance":batchTruth})
 
@@ -244,6 +249,7 @@ class net(object):
         model = Model(inputs=[inX1, inX2], outputs=distance)
 
         optimizer = Adam(self.learnRate)
+        #optimizer = RMSprop(self.learnRate)
         #model.compile(loss="binary_crossentropy",optimizer=optimizer,metrics=["binary_accuracy"])
         model.compile(loss=contrastive_loss,optimizer=optimizer,metrics=[compute_accuracy])
 
@@ -439,9 +445,20 @@ def test_v3_1(ver):
     n.test("High-speed data and voice services holding company, Wireless internet connection services holding company")
     n.test("Pharmaceutical solutions research and development services")
 
+def train_v3_2(): # 理由不明だが、何故か学習が進まない. Learn rateやOptimizerをいじってもダメだった
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror overview",u"Target overview"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512, # 2048にしてもダメ
+            nLength=50, # 20や200にしてもダメ
+            asymDistance = True, # Falseにしてもダメ
+            saveFolder="models/v3.2_Overview_minCount100_nLength50_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+    n.train()
 
-
-def train_v3_2():
+def test_v3_2(ver):
     d = DataAccessor()
     d.loadCSV("all.csv")
     d.loadW2V("w2v/wiki_mincount100.w2v")
@@ -449,10 +466,86 @@ def train_v3_2():
             goodFrac=0.5,
             nBatch=256,
             nGRU=512,
-            nLength=100,
+            nLength=50,
+            asymDistance = True)
+    n.reloadModel("models/v3.2_Overview_minCount100_nLength50_nGRU512/weights.%d.hdf5"%ver)
+
+    res = []
+    for i in (1,10,50,100,300,500,700,1000,3000,5000,7000,9000,10000,30000,50000,70000):
+        res.append(n.testByIndex(i))
+
+    for i,rr in enumerate(res):
+        ret,header = rr
+        idx,AcqName,words1 = header
+        with open("log/%d.csv"%idx,"w") as f:
+            c = csv.writer(f)
+            c.writerow(["","",AcqName,words1])
+            for cnt, score, targetName, words2 in ret:
+                c.writerow([cnt,score,targetName,words2])
+
+    return
+
+def train_v3_3(): 
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror name",u"Target name"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512, 
+            nLength=10,
             asymDistance = True,
-            saveFolder="models/v3.2_Overview_minCount100_nLength100_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+            saveFolder="models/v3.3_Name_minCount100_nLength10_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
     n.train()
+
+def test_v3_3(ver):
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror name",u"Target name"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=10,
+            asymDistance = True)
+    n.reloadModel("models/v3.3_Name_minCount100_nLength10_nGRU512/weights.%d.hdf5"%ver)
+
+    res = []
+    for i in (1,10,50,100,300,500,700,1000,3000,5000,7000,9000,10000,30000,50000,70000):
+        res.append(n.testByIndex(i))
+
+    return
+
+def train_v3_4(): 
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"",u"Target name"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512, 
+            nLength=10,
+            asymDistance = True,
+            saveFolder="models/v3.3_Name_minCount100_nLength10_nGRU512") # columnPairsはtupleにしないとキャッシュのところで落ちるので注意
+    n.train()
+
+def test_v3_4(ver):
+    d = DataAccessor()
+    d.loadCSV("all.csv")
+    d.loadW2V("w2v/wiki_mincount100.w2v")
+    n = net(d,columnPairs=(u"Acquiror name",u"Target name"),
+            goodFrac=0.5,
+            nBatch=256,
+            nGRU=512,
+            nLength=10,
+            asymDistance = True)
+    n.reloadModel("models/v3.3_Name_minCount100_nLength10_nGRU512/weights.%d.hdf5"%ver)
+
+    res = []
+    for i in (1,10,50,100,300,500,700,1000,3000,5000,7000,9000,10000,30000,50000,70000):
+        res.append(n.testByIndex(i))
+
+    return
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -466,3 +559,5 @@ if __name__=="__main__":
     elif args.mode=="test_v3.1" : test_v3_1(args.ver)
     elif args.mode=="train_v3.2": train_v3_2()
     elif args.mode=="test_v3.2" : test_v3_2(args.ver)
+    elif args.mode=="train_v3.3": train_v3_3()
+    elif args.mode=="test_v3.3" : test_v3_3(args.ver)
